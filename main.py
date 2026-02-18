@@ -1,23 +1,18 @@
 import os
 from dotenv import load_dotenv
 
-
 load_dotenv()
-
 
 from datetime import datetime
 import logging
 from enum import Enum
-
-
 from typing import Optional, List, Dict, Any
 
-
-from fastapi import FastAPI, HTTPException, status, Depends
+from fastapi import FastAPI, HTTPException, status, Depends, Query
 from pydantic import BaseModel, EmailStr, Field, validator
 
-
 from database import mountain_pass_dao, DatabaseManager, MountainPassDAO
+
 # Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
@@ -29,7 +24,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="Mountain Passes API",
     description="API для управления данными о горных перевалах",
-    version="1.0.0",
+    version="2.0.0",
     docs_url="/docs",
     redoc_url="/redoc"
 )
@@ -49,6 +44,7 @@ class Level(BaseModel):
     summer: Optional[str] = Field(None, pattern='^(1A|1B|2A|2B|3A|3B)$')
     autumn: Optional[str] = Field(None, pattern='^(1A|1B|2A|2B|3A|3B)$')
     spring: Optional[str] = Field(None, pattern='^(1A|1B|2A|2B|3A|3B)$')
+
 
 class Image(BaseModel):
     """Модель изображения"""
@@ -85,11 +81,37 @@ class MountainPassCreate(BaseModel):
         return v
 
 
+class MountainPassUpdate(BaseModel):
+    """Модель для обновления перевала"""
+    beautyTitle: Optional[str] = Field(None, max_length=255)
+    title: Optional[str] = Field(None, min_length=1, max_length=255)
+    other_titles: Optional[str] = Field(None, max_length=255)
+    connect: Optional[str] = Field(None, max_length=255)
+
+    user: Optional[User] = None
+    coords: Optional[Coords] = None
+
+    level: Optional[Level] = None
+    images: Optional[List[Image]] = Field(None, max_items=10)
+
+    @validator('images')
+    def validate_images(cls, v):
+        if v and len(v) > 10:
+            raise ValueError('Не более 10 изображений')
+        return v
+
+
 class MountainPassResponse(BaseModel):
-    """Модель ответа при создании/получении перевала"""
+    """Модель ответа при создании перевала"""
     id: int
     status: str
     message: Optional[str] = None
+
+
+class MountainPassUpdateResponse(BaseModel):
+    """Модель ответа при обновлении перевала"""
+    state: int
+    message: str
 
 
 class MountainPassStatus(str, Enum):
@@ -111,11 +133,14 @@ async def root():
     """Корневой эндпоинт"""
     return {
         "message": "Mountain Passes API",
-        "version": "1.0.0",
+        "version": "2.0.0",
         "docs": "/docs",
         "endpoints": {
             "submit_data": "POST /submitData",
-            "get_pass": "GET /submitData/{id}"
+            "get_pass": "GET /submitData/{id}",
+            "update_pass": "PATCH /submitData/{id}",
+            "get_user_passes": "GET /submitData/?user__email=<email>",
+            "health": "GET /health"
         }
     }
 
@@ -207,13 +232,17 @@ async def submit_data(
 @app.get(
     "/submitData/{pass_id}",
     summary="Получить информацию о перевале",
-    description="Получение полной информации о перевале по его ID"
+    description="Получение полной информации о перевале по его ID, включая статус модерации"
 )
 async def get_mountain_pass(
         pass_id: int,
         dao: MountainPassDAO = Depends(get_mountain_pass_dao)
 ):
-    """Получение информации о перевале по ID"""
+    """
+    Получение информации о перевале по ID
+
+    - **pass_id**: ID перевала
+    """
     try:
         logger.info(f"Запрос информации о перевале с ID: {pass_id}")
 
@@ -232,6 +261,120 @@ async def get_mountain_pass(
         raise
     except Exception as e:
         logger.error(f"Ошибка при получении перевала: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Внутренняя ошибка сервера: {str(e)}"
+        )
+
+
+@app.patch(
+    "/submitData/{pass_id}",
+    response_model=MountainPassUpdateResponse,
+    summary="Редактировать перевал",
+    description="""
+    Редактирование существующей записи о перевале, если она находится в статусе 'new'.
+
+    Можно редактировать все поля, кроме:
+    - ФИО пользователя (fam, name, otc)
+    - Email пользователя
+    - Номера телефона пользователя
+
+    В ответе возвращается:
+    - state: 1 - успешно, 0 - ошибка
+    - message: описание результата
+    """
+)
+async def update_mountain_pass(
+        pass_id: int,
+        data: MountainPassUpdate,
+        dao: MountainPassDAO = Depends(get_mountain_pass_dao)
+):
+    """
+    Редактирование перевала по ID
+
+    - **pass_id**: ID перевала
+    - **data**: Новые данные перевала (все поля опциональны)
+    """
+    try:
+        logger.info(f"Запрос на обновление перевала с ID: {pass_id}")
+
+        # Проверяем, что переданы данные для обновления
+        update_data = data.dict(exclude_unset=True)
+        if not update_data:
+            return MountainPassUpdateResponse(
+                state=0,
+                message="Нет данных для обновления"
+            )
+
+        # Получаем текущие данные перевала для проверки
+        current_data = dao.get_pass_by_id(pass_id)
+        if not current_data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Перевал с ID {pass_id} не найден"
+            )
+
+        # Обновляем перевал
+        result = dao.update_mountain_pass(pass_id, update_data)
+
+        if result['state'] == 0:
+            # Если это не критическая ошибка (например, неверный статус), возвращаем 200 с state=0
+            if "не найден" in result['message']:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=result['message']
+                )
+
+            return MountainPassUpdateResponse(
+                state=0,
+                message=result['message']
+            )
+
+        logger.info(f"Перевал с ID {pass_id} успешно обновлен")
+        return MountainPassUpdateResponse(
+            state=1,
+            message=result['message']
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Ошибка при обновлении перевала: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Внутренняя ошибка сервера: {str(e)}"
+        )
+
+
+@app.get(
+    "/submitData/",
+    summary="Получить перевалы пользователя",
+    description="Получение списка всех перевалов, отправленных пользователем с указанным email"
+)
+async def get_passes_by_user(
+        user__email: str = Query(..., description="Email пользователя",
+                                 regex=r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$"),
+        dao: MountainPassDAO = Depends(get_mountain_pass_dao)
+):
+    """
+    Получение всех перевалов пользователя по email
+
+    - **user__email**: Email пользователя
+    """
+    try:
+        logger.info(f"Запрос перевалов пользователя с email: {user__email}")
+
+        passes = dao.get_passes_by_user_email(user__email)
+
+        if not passes:
+            logger.info(f"Перевалы пользователя {user__email} не найдены")
+            return []
+
+        logger.info(f"Найдено {len(passes)} перевалов пользователя {user__email}")
+        return passes
+
+    except Exception as e:
+        logger.error(f"Ошибка при получении перевалов пользователя: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Внутренняя ошибка сервера: {str(e)}"
