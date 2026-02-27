@@ -4,3 +4,4 @@ pydantic-settings>=2.0.0
 psycopg2-binary
 python-dotenv
 uvicorn
+email-validator==2.1.0
