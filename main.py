@@ -9,7 +9,8 @@ from enum import Enum
 from typing import Optional, List, Dict, Any
 
 from fastapi import FastAPI, HTTPException, status, Depends, Query
-from pydantic import BaseModel, EmailStr, Field, validator
+# В Pydantic v2 EmailStr иногда нужно импортировать отдельно, но обычно работает отсюда
+from pydantic import BaseModel, EmailStr, Field, field_validator
 
 from database import mountain_pass_dao, DatabaseManager, MountainPassDAO
 
@@ -40,10 +41,10 @@ class Coords(BaseModel):
 
 class Level(BaseModel):
     """Модель уровня сложности"""
-    winter: Optional[str] = Field(None, pattern='^(1A|1B|2A|2B|3A|3B)$')
-    summer: Optional[str] = Field(None, pattern='^(1A|1B|2A|2B|3A|3B)$')
-    autumn: Optional[str] = Field(None, pattern='^(1A|1B|2A|2B|3A|3B)$')
-    spring: Optional[str] = Field(None, pattern='^(1A|1B|2A|2B|3A|3B)$')
+    winter: Optional[str] = Field(None, pattern=r'^(1A|1B|2A|2B|3A|3B)$')
+    summer: Optional[str] = Field(None, pattern=r'^(1A|1B|2A|2B|3A|3B)$')
+    autumn: Optional[str] = Field(None, pattern=r'^(1A|1B|2A|2B|3A|3B)$')
+    spring: Optional[str] = Field(None, pattern=r'^(1A|1B|2A|2B|3A|3B)$')
 
 
 class Image(BaseModel):
@@ -72,9 +73,11 @@ class MountainPassCreate(BaseModel):
     coords: Coords
 
     level: Optional[Level] = None
-    images: Optional[List[Image]] = Field(None, max_items=10)
+    # В Pydantic v2 используем max_length вместо max_items
+    images: Optional[List[Image]] = Field(None, max_length=10)
 
-    @validator('images')
+    @field_validator('images')
+    @classmethod  # Обязательно в v2!
     def validate_images(cls, v):
         if v and len(v) > 10:
             raise ValueError('Не более 10 изображений')
@@ -92,9 +95,10 @@ class MountainPassUpdate(BaseModel):
     coords: Optional[Coords] = None
 
     level: Optional[Level] = None
-    images: Optional[List[Image]] = Field(None, max_items=10)
+    images: Optional[List[Image]] = Field(None, max_length=10)
 
-    @validator('images')
+    @field_validator('images')
+    @classmethod  # Обязательно в v2!
     def validate_images(cls, v):
         if v and len(v) > 10:
             raise ValueError('Не более 10 изображений')
@@ -185,21 +189,12 @@ async def submit_data(
 ):
     """
     Создание новой записи о перевале
-
-    - **beautyTitle**: Красивое название перевала
-    - **title**: Официальное название
-    - **other_titles**: Другие названия
-    - **connect**: Что соединяет перевал
-    - **user**: Информация о пользователе (отправителе)
-    - **coords**: Координаты перевала
-    - **level**: Уровни сложности по сезонам
-    - **images**: Список изображений (до 10)
     """
     try:
         logger.info(f"Получен запрос на добавление перевала: {data.title}")
 
-        # Преобразуем данные в формат для БД
-        pass_data = data.dict()
+        # В Pydantic v2 используем model_dump() вместо dict()
+        pass_data = data.model_dump()
 
         # Добавляем перевал в базу данных
         pass_id = dao.add_mountain_pass(pass_data)
@@ -240,8 +235,6 @@ async def get_mountain_pass(
 ):
     """
     Получение информации о перевале по ID
-
-    - **pass_id**: ID перевала
     """
     try:
         logger.info(f"Запрос информации о перевале с ID: {pass_id}")
@@ -273,15 +266,6 @@ async def get_mountain_pass(
     summary="Редактировать перевал",
     description="""
     Редактирование существующей записи о перевале, если она находится в статусе 'new'.
-
-    Можно редактировать все поля, кроме:
-    - ФИО пользователя (fam, name, otc)
-    - Email пользователя
-    - Номера телефона пользователя
-
-    В ответе возвращается:
-    - state: 1 - успешно, 0 - ошибка
-    - message: описание результата
     """
 )
 async def update_mountain_pass(
@@ -291,15 +275,13 @@ async def update_mountain_pass(
 ):
     """
     Редактирование перевала по ID
-
-    - **pass_id**: ID перевала
-    - **data**: Новые данные перевала (все поля опциональны)
     """
     try:
         logger.info(f"Запрос на обновление перевала с ID: {pass_id}")
 
-        # Проверяем, что переданы данные для обновления
-        update_data = data.dict(exclude_unset=True)
+        # В Pydantic v2 используем model_dump(exclude_unset=True)
+        update_data = data.model_dump(exclude_unset=True)
+
         if not update_data:
             return MountainPassUpdateResponse(
                 state=0,
@@ -318,7 +300,6 @@ async def update_mountain_pass(
         result = dao.update_mountain_pass(pass_id, update_data)
 
         if result['state'] == 0:
-            # Если это не критическая ошибка (например, неверный статус), возвращаем 200 с state=0
             if "не найден" in result['message']:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
@@ -358,8 +339,6 @@ async def get_passes_by_user(
 ):
     """
     Получение всех перевалов пользователя по email
-
-    - **user__email**: Email пользователя
     """
     try:
         logger.info(f"Запрос перевалов пользователя с email: {user__email}")
@@ -386,7 +365,6 @@ async def startup_event():
     """Действия при запуске приложения"""
     logger.info("Запуск Mountain Passes API...")
 
-    # Проверяем наличие необходимых переменных окружения
     required_env_vars = ['FSTR_DB_LOGIN', 'FSTR_DB_PASS']
     missing_vars = [var for var in required_env_vars if not os.getenv(var)]
 
@@ -401,7 +379,6 @@ async def shutdown_event():
     """Действия при завершении работы приложения"""
     logger.info("Завершение работы Mountain Passes API...")
 
-    # Закрываем соединение с БД
     try:
         db_manager = DatabaseManager()
         db_manager.close_connection()
