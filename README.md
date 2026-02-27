@@ -107,10 +107,10 @@ pytest
 Проект готов к развертыванию на любых платформах, поддерживающих Python (Render, Railway, VPS).
 
 Ссылка на работающий проект:
-[ВСТАВЬ СЮДА ССЫЛКУ НА СВОЙ ХОСТИНГ, ЕСЛИ ОН ЕСТЬ]
+https://pereval-fastapi-2.onrender.com/docs
 
 Пример запроса к опубликованному API:
-curl -X GET https://твой-домен.com/submitData/
+curl -X GET https://pereval-fastapi-2.onrender.com/main
 
 ## Автор
 Студент-разработчик (FastAPI Track)
